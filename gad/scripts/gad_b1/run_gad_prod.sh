@@ -36,6 +36,14 @@ REPLAY_CAPACITY=${REPLAY_CAPACITY:-1024}
 REPLAY_RHO=${REPLAY_RHO:-0.5}
 REPLAY_STRATEGY=${REPLAY_STRATEGY:-uniform}
 
+# Allow RESUME_STEP=latest: pick the highest global_step_N in the warmup ckpt dir at RUN
+# time (so warmup->GAD can be chained via SLURM dependency without knowing the final step).
+if [ "$RESUME_STEP" = "latest" ]; then
+  RESUME_STEP=$(ls -1d $WORKDIR/ckpts/$WARMUP_EXP/global_step_* 2>/dev/null | sed 's/.*global_step_//' | sort -n | tail -1)
+  [ -n "$RESUME_STEP" ] || { echo "ERROR: no global_step_* checkpoint in $WORKDIR/ckpts/$WARMUP_EXP"; exit 1; }
+  echo "resolved RESUME_STEP=latest -> $RESUME_STEP"
+fi
+
 echo "===== 1/4: env ====="
 source $WORKDIR/venv/bin/activate
 export TMPDIR=$WORKDIR/tmp TEMP=$WORKDIR/tmp TMP=$WORKDIR/tmp
@@ -62,6 +70,11 @@ echo "===== 3/4: merge warmup checkpoint (FSDP shards -> HF) ====="
 WCKPT=$WORKDIR/ckpts/$WARMUP_EXP/global_step_${RESUME_STEP}
 [ -d "$WCKPT" ] || { echo "ERROR: warmup checkpoint $WCKPT not found"; exit 1; }
 cd $LMOPS/gad
+# Serialize the merge: parallel GAD jobs (baseline + replay) share this warmup checkpoint,
+# so flock prevents them from racing to write the same huggingface/ dir. Second job blocks,
+# then sees the merge is done and skips.
+exec 9>"$WORKDIR/ckpts/$WARMUP_EXP/.merge.lock"
+flock 9
 for role in actor critic; do
   if [ -f "$WCKPT/$role/huggingface/model.safetensors" ] || ls "$WCKPT/$role/huggingface"/*.safetensors >/dev/null 2>&1; then
     echo "  $role already merged, skipping"
@@ -72,6 +85,7 @@ for role in actor critic; do
   fi
   echo "  $role/huggingface:"; ls $WCKPT/$role/huggingface | head
 done
+flock -u 9
 MODEL_PATH=$WCKPT/actor/huggingface
 REWARD_PATH=$WCKPT/critic/huggingface
 

@@ -40,7 +40,15 @@ To avoid a ~6-day full run before knowing the code works, we **subsampled the tr
 2. **Found and fixed a GPU-only bug.** On the first *mixed* discriminator update, training crashed: buffered rows are stored on CPU (a memory optimization) and were not moved back to the GPU before being concatenated with the fresh batch. The CPU-only unit tests could not surface this. Fixed by moving the buffered tensor block to the live device before concatenation.
 3. **The naive comparison is not interpretable.** Final val rouge-L was replay 0.272 vs baseline 0.280 — within noise at this scale — and the discriminator's own `d_loss`/`d_acc` are **contaminated** when replay is on (see §4).
 
-**Status:** H2 supported — the gate showed step-1 generator quantities byte-identical (cap=0 vs. cap=4096), now hardened into a deterministic in-loop invariant (row count preserved, fresh batch never mutated, checked every step). The clean `d_acc_fresh` metric is implemented and an interpretable A/B re-run is in progress. H3 (efficacy) still needs the full-scale run.
+**Status:** H2 supported — the gate showed step-1 generator quantities byte-identical (cap=0 vs. cap=4096), now hardened into a deterministic in-loop invariant (row count preserved, fresh batch never mutated, checked every step). The clean `d_acc_fresh` metric is implemented and an interpretable A/B re-run confirmed it (§3.3). H3 (efficacy) still needs the full-scale run.
+
+### 3.3 A/B result (subsampled, clean metric + live invariants)
+
+Re-ran baseline (cap=0) vs. replay (cap=4096, rho=0.5), 24 GAD steps each, with `d_acc_fresh` and the in-loop correctness assertions active.
+
+- **Correctness (H2) — passed deterministically.** The replay run completed all 24 steps with zero assertion failures: batch size preserved and the fresh batch unmutated on every mixed update (step 2 onward). Single-run, so no cross-node nondeterminism confound.
+- **Contamination — demonstrated.** On the replay arm the old `d_acc` (last 12 steps: band [0.921, 0.984], spread 0.063) is ~40% narrower than the clean `d_acc_fresh` ([0.895, 1.000], spread 0.105) — stale rows make the discriminator look more stable than it actually is on current students. Confirms the clean metric was necessary.
+- **Efficacy (H3) — inconclusive at this scale, as expected.** `d_acc_fresh` is statistically indistinguishable: baseline mean 0.941 (band [0.863, 1.000]) vs. replay 0.940 ([0.824, 1.000]). Replay targets the mode-collapse chase-cycle, which only emerges over hundreds of steps; 24 steps gives it nothing to fix. rouge-L (0.285 vs. 0.267) is noise. Efficacy is deferred to the full-scale run (§6.1).
 
 ## 4. Why `d_acc`/`d_loss` are contaminated, and why the correctness gate is the right first measure
 
