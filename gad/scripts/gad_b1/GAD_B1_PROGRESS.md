@@ -71,7 +71,7 @@ Three discriminator research directions are scoped for this track (source: `mana
 ### 6.1 Direction 2 — Replay-Buffer Discriminator *(in progress)*
 Mixes stale (teacher, past-student) BT pairs into the D update to break the GAN chase-cycle / mode collapse.
 - **Done:** integration + GPU device fix; deterministic in-loop correctness invariants (row-count preserved ⇒ D:G ratio unchanged; fresh batch never mutated); clean `d_acc_fresh` diagnostic; subsampled A/B (baseline vs. cap=4096) running.
-- **Next:** full-scale run (TP=1 + v1, keep-last-2): warmup (~2 d) → GAD-with-replay (~2 d), then the **replay sweep** — capacity ∈ {0, 1024, 4096, 16384} × rho ∈ {0.25, 0.5} × strategy ∈ {uniform, recency-weighted (λ=1e-3)}.
+- **Next:** full-scale A/B on a **33% category-stratified subsample** (`make_subsample.py`: 192K → 63,215 rows, proportion drift < 1e-4, smallest of 31 classes still 296). Subsampling keeps GAD ≥ 400 adversarial steps (enough for the chase-cycle to develop) while fitting the 72 h job limit — full data would need ~5 d/arm. TP=1 + v1, keep-last-2: warmup (246 st, ~15 h) → baseline + replay GAD in parallel (492 st/arm, ~40 h). Both arms share the subset, so the comparison stays clean. Then the **replay sweep** — capacity ∈ {0, 1024, 4096, 16384} × rho ∈ {0.25, 0.5} × strategy ∈ {uniform, recency-weighted (λ=1e-3)}.
 - **Success:** `d_acc_fresh` settles into a tight ~[0.70, 0.85] band vs. the baseline's wide ~[0.55, 0.95] swing, and LMSYS GPT-4o judge win-rate ≥ baseline. Drift toward 0.5 ⇒ stale-dulling ⇒ lower capacity/rho.
 
 ### 6.2 Direction 3 — Multi-Aspect Discriminator Head *(next)*
