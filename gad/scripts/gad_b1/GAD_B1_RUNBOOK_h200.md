@@ -6,10 +6,23 @@
 | Constraint | Consequence |
 |---|---|
 | Login node has **no GPU** | all training via `sbatch`; validate with `nvidia-smi` on the compute node, not the login node |
-| SLURM QOS `h200_dev` (account `mrs_2`) | **no wall-time limit** (partition cap = 7 days; the "12h limit" is a myth here); **max 2 nodes per user** concurrently |
+| SLURM QOS `h200_dev` (account `mrs_2`) | **no wall-time limit** (partition cap = 7 days; the "12h limit" is a myth here); **max 2 nodes per user** (`MaxTRESPU gpu=16,node=2`) — see the QOS table below to run more concurrently |
 | Real compute nodes have normal `/dev/shm` and networking | **do NOT** set the sandbox hacks (`NCCL_SOCKET_IFNAME=lo`, `NCCL_SHM_DISABLE=1`) or source the sandbox `env.sh` proxies — they hurt or break on real nodes |
 | H200 = **141 GB** HBM | 7B fits easily on one GPU → use **TP=1**; memory is never the bottleneck |
 | Home = FSx, **per-user quota** | each 7B checkpoint ≈ 150 GB → **keep-last-2** or you WILL hit `EDQUOT` mid-run |
+
+### QOS options (account `mrs_2`) — beating the 2-node cap
+The default launchers hardcode `--qos=h200_dev`, which caps you at **2 nodes/user**. To run more experiments concurrently, override with `sbatch --qos=<name> ...` (account stays `mrs_2`):
+
+| QOS | Priority | Per-user cap | Group cap | Use for |
+|---|---|---|---|---|
+| `h200_dev` | 100 | **gpu=16 / node=2** | — | default; single experiment |
+| **`h200_mrs_2_high`** | 100 | **none** | gpu=296 (group) | **concurrent runs** — same priority as dev, no per-user limit |
+| `h200_mrs_shared` (default) | 5 (low) | gpu=256 | gpu=80 (group) | overflow; low priority, may wait/preempt |
+| `lowest` | 1 | — | gpu=0 | unusable for GPU jobs |
+
+Example — two full A/B chains at once: keep one on `h200_dev`, put the other on `--qos=h200_mrs_2_high`. They draw from separate budgets. Inspect limits with `sacctmgr show qos <name> format=Name,Priority,MaxTRESPU,GrpTRES`.
+
 
 ## 1. Environment (once)
 - venv at `~/gad_run/venv` (torch 2.6.0+cu124, vllm 0.8.5, verl editable). Python headers for Triton in `~/gad_run/pyinclude`.
