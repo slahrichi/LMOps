@@ -23,7 +23,8 @@ for i in $(seq 1 504); do   # ~7 days at 20min
     id=${j%%:*}; lbl=${j##*:}
     st=$(squeue -h -j "$id" -o "%T" 2>/dev/null)
     [ -z "$st" ] && st=$(sacct -n -j "$id" --format=State 2>/dev/null | head -1 | tr -d ' ')
-    prog=$(grep -aoE "Training Progress: *[0-9]+%" "$LOGDIR/gad-$id.out" 2>/dev/null | tail -1 | grep -oE "[0-9]+%")
+    case "$lbl" in *warmup*) f=$LOGDIR/warmup-$id.out;; *) f=$LOGDIR/gad-$id.out;; esac
+    prog=$(grep -aoE "Training Progress: *[0-9]+%" "$f" 2>/dev/null | tail -1 | grep -oE "[0-9]+%")
     line+="$lbl=$st${prog:+/$prog} "
   done
   if [ "$line" != "$prev" ]; then
