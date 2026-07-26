@@ -6,7 +6,7 @@ LOGDIR=/home/saadlahrichi/gad_run/logs
 MLOG=$LOGDIR/fs_watch.log
 # jobid:label
 JOBS=("1565444:33-warmup" "1565445:33-base" "1565446:33-replay" \
-      "1565552:50-warmup" "1567812:50-base" "1567813:50-replay")
+      "1567822:50-warmup" "1567823:50-base" "1567824:50-replay")
 IDS=$(printf "%s," "${JOBS[@]%%:*}"); IDS=${IDS%,}
 
 band() {  # summarize critic/d_acc_fresh from a job log
@@ -46,11 +46,11 @@ echo ""
 echo "=== d_acc_fresh (clean signal) — replay vs baseline ==="
 echo "33% baseline: $(band 1565445)"
 echo "33% replay  : $(band 1565446)"
-echo "50% baseline: $(band 1567812)"
-echo "50% replay  : $(band 1567813)"
+echo "50% baseline: $(band 1567823)"
+echo "50% replay  : $(band 1567824)"
 echo ""
 echo "=== final val rouge-L ==="
-for j in "1565445:33-base" "1565446:33-replay" "1567812:50-base" "1567813:50-replay"; do
+for j in "1565445:33-base" "1565446:33-replay" "1567823:50-base" "1567824:50-replay"; do
   id=${j%%:*}; lbl=${j##*:}
   echo "$lbl: $(grep -aoE 'val/rouge-L/mean:[0-9.]+' "$LOGDIR/gad-$id.out" 2>/dev/null | tail -1)"
 done
