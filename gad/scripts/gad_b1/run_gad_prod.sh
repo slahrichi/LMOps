@@ -52,6 +52,7 @@ export C_INCLUDE_PATH=$WORKDIR/pyinclude:${C_INCLUDE_PATH:-}
 export CPLUS_INCLUDE_PATH=$WORKDIR/pyinclude:${CPLUS_INCLUDE_PATH:-}
 mkdir -p $TMPDIR $CKPT $WORKDIR/logs
 export VLLM_USE_V1=1
+export PYTHONUNBUFFERED=1   # stream metric lines live (else Ray buffers stdout until exit)
 export WANDB_MODE=disabled
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1

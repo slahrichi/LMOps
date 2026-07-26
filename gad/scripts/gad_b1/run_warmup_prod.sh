@@ -37,7 +37,8 @@ mkdir -p $TMPDIR $CKPT $WORKDIR/logs
 python -c "import torch, vllm, verl; print('torch', torch.__version__, '| vllm', vllm.__version__, '| verl OK')"
 
 # --- winning perf config ---
-export VLLM_USE_V1=1                 # v1 engine: cut generation ~118s -> ~85s (validated variant D)
+export VLLM_USE_V1=1
+export PYTHONUNBUFFERED=1   # stream metric lines live                 # v1 engine: cut generation ~118s -> ~85s (validated variant D)
 export WANDB_MODE=disabled
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
