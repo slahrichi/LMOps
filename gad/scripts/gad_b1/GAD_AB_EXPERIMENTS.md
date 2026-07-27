@@ -161,6 +161,7 @@ Comparing the two 33% arms over the steps both have completed (both resumed from
 
 ## 8. Planned follow-ups
 
+- **SeqKD baseline** (paper's sequence-level KD — the number GAD must beat): `run_seqkd_prod.sh` = teacher-forcing SFT of the **base** 7B on GPT-5-Chat responses (branch `seqkd`, `compute_sft_loss`; no warmup/discriminator/GRPO), lr 5e-6, 4 epochs, on the **same 33%/50% subsets**. Submitted 2026-07-27: `fs33-seqkd` (1574491), `fs50-seqkd` (1574492) on `h200_mrs_2_high`. Turns each fraction into a **3-way comparison — SeqKD vs GAD-base vs GAD-replay** on identical data. SeqKD has no `d_acc_fresh` (no discriminator); compare via val rouge-L + win-rate.
 - **Replay sweep** (after first A/B results): `capacity ∈ {0, 1024, 4096, 16384}` ×
   `rho ∈ {0.25, 0.5}` × `strategy ∈ {uniform, recency-weighted (λ=1e-3)}`.
 - **Eval**: Qwen2.5-72B chat win-rate (+ math accuracy for the multi-aspect line).
