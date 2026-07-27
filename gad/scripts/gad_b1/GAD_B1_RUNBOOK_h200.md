@@ -9,7 +9,8 @@
 | SLURM QOS `h200_dev` (account `mrs_2`) | **no wall-time limit** (partition cap = 7 days; the "12h limit" is a myth here); **max 2 nodes per user** (`MaxTRESPU gpu=16,node=2`) — see the QOS table below to run more concurrently |
 | Real compute nodes have normal `/dev/shm` and networking | **do NOT** set the sandbox hacks (`NCCL_SOCKET_IFNAME=lo`, `NCCL_SHM_DISABLE=1`) or source the sandbox `env.sh` proxies — they hurt or break on real nodes |
 | H200 = **141 GB** HBM | 7B fits easily on one GPU → use **TP=1**; memory is never the bottleneck |
-| Home = FSx (**shared ~43 TB; no per-user quota found**) | each 7B checkpoint ≈ 150 GB → **keep-last-2** + prune completed arms to final `gs492`; the *shared* FS filling (from anyone) can fail a save mid-write → watch `df -h ~`, not just your own usage |
+| **`/home` = FSx-OpenZFS, hard 1 TB per-user quota** (NOT for ckpts/models, per infra) | a single 7B ckpt ≈ 150 GB → 2–3 arms overflow 1 TB and saves die with **`Disk quota exceeded`** (killed the SeqKD arms 2026-07-27). **Write ckpts to Lustre instead** (see §5). `df -h ~` shows the 43 TB *filesystem*, NOT your quota — ignore it. ZFS snapshots keep deleted files counted against quota for **24–48 h**, so `rm` gives no instant relief — the fix is to stop writing to `/home`, not to delete |
+| **Lustre project FS** `/checkpoints/$USER`, `/fsx/$USER` (200 T+, ~23 T free, **no 1 TB quota**) | **read-only from the login node, WRITABLE from compute nodes** — jobs checkpoint from compute, so point `trainer.default_local_dir` here. To copy existing data off `/home` you must run `cp`/`mv` from a compute node (`srun --overlap --jobid=<running> cp ...`) |
 
 ### QOS options (account `mrs_2`) — beating the 2-node cap
 The default launchers hardcode `--qos=h200_dev`, which caps you at **2 nodes/user**. To run more experiments concurrently, override with `sbatch --qos=<name> ...` (account stays `mrs_2`):
@@ -53,8 +54,14 @@ EXP=mini-warmup TRAIN=$PWD/data/mini_train.parquet \
 ```
 Resilience: if a job dies (node/preempt), just resubmit — `resume_mode=auto` continues from the last checkpoint. No job-chaining needed (no wall limit).
 
-## 5. Checkpoints — you don't need them all
-GAD resumes from a **single** warmup checkpoint (the final one). Intermediates are only crash-insurance. Both launchers set `save_freq=200` + `max_{actor,critic}_ckpt_to_keep=2` → ~300 GB/stage instead of TBs. After GAD starts (loads the merged HF), the warmup FSDP shards are deletable.
+## 5. Checkpoints — where they go + you don't need them all
+**Write to Lustre, not `/home`** (the 1 TB quota kills multi-arm runs). The launchers take a `CKPT_ROOT` override:
+```bash
+CKPT_ROOT=/checkpoints/$USER/gad_run/ckpts  EXP=<exp> ... sbatch run_gad_prod.sh   # (or run_seqkd_prod.sh)
+#   default (unset) = ~/gad_run/ckpts on /home — only for tiny/debug runs
+#   warmup is still READ from ~/gad_run/ckpts/$WARMUP_EXP; only the OUTPUT goes to CKPT_ROOT
+```
+GAD resumes from a **single** warmup checkpoint (the final one). Intermediates are only crash-insurance. Both launchers set `save_freq=200` (fs50=50) + `max_{actor,critic}_ckpt_to_keep=2` → ~300 GB/stage instead of TBs. After GAD starts (loads the merged HF), the warmup FSDP shards are deletable (keep only `{actor,critic}/huggingface/` ≈ 28 GB for re-init).
 
 ## 6. Monitor / manage
 ```bash
@@ -70,5 +77,5 @@ du -sh ~/gad_run/ckpts ; df -h ~   # watch OUR footprint AND shared-FS free spac
 - Inline the training config in the sbatch script (don't `bash` a second NFS script mid-job) — avoids an NFS "stale file handle" abort seen on a long run.
 - `critic.replay.model_dtype`-style keys not in the config struct need Hydra's `+` prefix; `critic.replay.{capacity,rho,strategy}` are in-struct (plain override).
 - **Frozen console log ≠ crashed job.** Ray's log capture can stall (esp. without `PYTHONUNBUFFERED=1`) while training continues. Verify with `srun --jobid=<id> --overlap -N1 nvidia-smi` (busy GPUs = alive) and checkpoint mtimes *before* killing anything.
-- **Disk-full during a checkpoint save → corrupt ckpt** (critic missing `extra_state_*.pt`; a good save has 24 `.pt` per actor/ & critic/). Recovery: `rm -rf ckpts/<EXP>/global_step_N` and resubmit — empty/older ckpt dir → `resume_mode=auto` re-inits from the merged warmup HF. Prevent: keep-last-2, prune completed arms to final `gs492`, and watch free space (the ceiling is the shared FSx, not a per-user quota).
+- **Disk-full during a checkpoint save → corrupt ckpt** (critic missing `extra_state_*.pt`; a good save has 24 `.pt` per actor/ & critic/). Recovery: `rm -rf ckpts/<EXP>/global_step_N` and resubmit — empty/older ckpt dir → `resume_mode=auto` re-inits from the merged warmup HF. Prevent: **write ckpts to Lustre** (`CKPT_ROOT`, see §5) so the 1 TB `/home` quota is a non-issue; keep-last-2; prune completed arms to final `gs492`.
 - **`h200_mrs_shared` is preemptible** (priority 5) — low-priority arms get bumped; on it, use a small `save_freq` (e.g. 50) or move to `h200_dev` for uninterrupted runs.
