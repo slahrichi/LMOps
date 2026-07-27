@@ -24,3 +24,15 @@ A fast end-to-end test on a 3,072-example subsample (vs. the full 192K): warmup 
 - **Bottom line:** we can now trust the machinery. To measure whether replay actually *helps*, we need (1) a correctness check that replay only touches the discriminator (running now), (2) a clean held-out discriminator metric, and (3) a full-scale run. We also cut per-step cost ~2× (engine/parallelism tuning), so a full run is ~2 days rather than ~4.
 
 *Prepared from run logs; jobs 1564466 (replay) / 1564467 (baseline).*
+
+---
+
+## Update (2026-07-27) — full-scale A/B underway
+
+The correctness check passed (deterministically) and the clean discriminator metric (`d_acc_fresh`) is implemented. We're now running the **full-scale A/B** on a **33% category-stratified subsample** (63,215 examples; keeps GAD ≥ 400 steps while fitting the 72 h job limit), baseline vs. replay, both from the *same* warmup init.
+
+- **33-replay arm complete** (val rouge-L 0.307); **33-base ~60%**; a **50% replicate** is queued.
+- **Preliminary (n=1, discriminator *stability*):** over the overlapping steps, replay holds a **tighter, higher** teacher-vs-current-student accuracy band (std **0.118 vs 0.173**, mean 0.864 vs 0.815) with far fewer instability dips (baseline even collapsed to ~0.05 once) — the predicted "healthier adversarial equilibrium."
+- **Caveat:** this is *not* a quality verdict. val rouge-L is a wash and is only a weak lexical proxy; the real test is the **LLM-judge win-rate** once base finishes (+ the 50% replicate to confirm, n=1 today).
+
+Full mechanics/status: `GAD_AB_EXPERIMENTS.md`.

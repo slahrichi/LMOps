@@ -9,7 +9,7 @@
 | SLURM QOS `h200_dev` (account `mrs_2`) | **no wall-time limit** (partition cap = 7 days; the "12h limit" is a myth here); **max 2 nodes per user** (`MaxTRESPU gpu=16,node=2`) — see the QOS table below to run more concurrently |
 | Real compute nodes have normal `/dev/shm` and networking | **do NOT** set the sandbox hacks (`NCCL_SOCKET_IFNAME=lo`, `NCCL_SHM_DISABLE=1`) or source the sandbox `env.sh` proxies — they hurt or break on real nodes |
 | H200 = **141 GB** HBM | 7B fits easily on one GPU → use **TP=1**; memory is never the bottleneck |
-| Home = FSx, **per-user quota** | each 7B checkpoint ≈ 150 GB → **keep-last-2** or you WILL hit `EDQUOT` mid-run |
+| Home = FSx (**shared ~43 TB; no per-user quota found**) | each 7B checkpoint ≈ 150 GB → **keep-last-2** + prune completed arms to final `gs492`; the *shared* FS filling (from anyone) can fail a save mid-write → watch `df -h ~`, not just your own usage |
 
 ### QOS options (account `mrs_2`) — beating the 2-node cap
 The default launchers hardcode `--qos=h200_dev`, which caps you at **2 nodes/user**. To run more experiments concurrently, override with `sbatch --qos=<name> ...` (account stays `mrs_2`):
@@ -30,7 +30,7 @@ Example — two full A/B chains at once: keep one on `h200_dev`, put the other o
 - Do **not** source the sandbox `env.sh` in an sbatch job; the production launchers set only what a compute node needs (`TMPDIR`, `HF_HOME`, `C_INCLUDE_PATH`) and `unset` the proxies.
 
 ## 2. Winning performance config (adopt everywhere)
-`actor_rollout_ref.rollout.tensor_model_parallel_size=1` + `VLLM_USE_V1=1` → ~212 s/step (≈1.9× faster than the TP=2/v0 reference). `gpu_memory_utilization=0.7` (higher gives nothing). Discriminator stays **fp32** (paper-faithful; bf16 gave no speedup). `+data.dataloader_num_workers=0`, `ray_init.num_cpus=32`.
+`actor_rollout_ref.rollout.tensor_model_parallel_size=1` + `VLLM_USE_V1=1` → ~212 s/step (≈1.9× faster than the TP=2/v0 reference). `gpu_memory_utilization=0.7` (higher gives nothing). Discriminator stays **fp32** (paper-faithful; bf16 gave no speedup). `+data.dataloader_num_workers=0`, `ray_init.num_cpus=32`, and **`export PYTHONUNBUFFERED=1`** (else the per-step metric lines — incl. `critic/d_acc_fresh` — buffer and don't appear in the `.out` until the job exits).
 
 ## 3. Data
 `~/gad_run/data/lmsys_{train,test}-00000-of-00001.parquet` = `ytz20/LMSYS-Chat-GPT-5-Chat-Response` (192K train / 479 test). Verified to match the paper. Subsample for fast e2e tests: `mini_train.parquet` (3,072 rows = 12 steps/epoch).
@@ -58,13 +58,17 @@ GAD resumes from a **single** warmup checkpoint (the final one). Intermediates a
 
 ## 6. Monitor / manage
 ```bash
-squeue --me
+squeue -u $USER          # `squeue --me` intermittently returns empty here — use -u $USER or -j <ids>
 tail -f ~/gad_run/logs/<stage>-<jobid>.out
 grep -E "step:[0-9]|timing_s/step" ~/gad_run/logs/<stage>-<jobid>.out | tail
-du -sh ~/gad_run/ckpts/*                      # watch the quota
+du -sh ~/gad_run/ckpts ; df -h ~   # watch OUR footprint AND shared-FS free space
 ```
+`watch_fullscale.sh` runs a background milestone logger + **disk tripwire** (alerts if FSx free < 2 TB or ckpts > 2.5 TB).
 
 ## 7. Gotchas hit (and fixed)
 - `ray_init.num_cpus=32` is **required** — without it Ray over-subscribes the node's cores and the raylet handshake fails.
 - Inline the training config in the sbatch script (don't `bash` a second NFS script mid-job) — avoids an NFS "stale file handle" abort seen on a long run.
 - `critic.replay.model_dtype`-style keys not in the config struct need Hydra's `+` prefix; `critic.replay.{capacity,rho,strategy}` are in-struct (plain override).
+- **Frozen console log ≠ crashed job.** Ray's log capture can stall (esp. without `PYTHONUNBUFFERED=1`) while training continues. Verify with `srun --jobid=<id> --overlap -N1 nvidia-smi` (busy GPUs = alive) and checkpoint mtimes *before* killing anything.
+- **Disk-full during a checkpoint save → corrupt ckpt** (critic missing `extra_state_*.pt`; a good save has 24 `.pt` per actor/ & critic/). Recovery: `rm -rf ckpts/<EXP>/global_step_N` and resubmit — empty/older ckpt dir → `resume_mode=auto` re-inits from the merged warmup HF. Prevent: keep-last-2, prune completed arms to final `gs492`, and watch free space (the ceiling is the shared FSx, not a per-user quota).
+- **`h200_mrs_shared` is preemptible** (priority 5) — low-priority arms get bumped; on it, use a small `save_freq` (e.g. 50) or move to `h200_dev` for uninterrupted runs.
