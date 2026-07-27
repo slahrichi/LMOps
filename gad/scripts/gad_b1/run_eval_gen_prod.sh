@@ -50,7 +50,7 @@ else
 fi
 MODEL_PATH=$CKPT/actor/huggingface
 
-echo "===== 3/3: generate on '$VAL_DATA' (val_only, n=1) -> $OUTDIR ====="
+echo "===== 3/3: generate on '$VAL_DATA' (val_only, n=8 per paper generate.sh) -> $OUTDIR ====="
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.prompt_key=content \
@@ -81,7 +81,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.temperature=0.8 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
-    actor_rollout_ref.rollout.n=1 \
+    actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=False \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
