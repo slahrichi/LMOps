@@ -23,7 +23,8 @@ MODEL=/checkpoints/jasonjx/models/Qwen2.5-7B-Instruct   # SeqKD trains the BASE 
 EXP=${EXP:-fs33-seqkd}
 TRAIN=${TRAIN:-$WORKDIR/data/lmsys_train_strat33.parquet}
 VAL=${VAL:-$WORKDIR/data/lmsys_test-00000-of-00001.parquet}
-CKPT=$WORKDIR/ckpts/$EXP
+CKPT_ROOT=${CKPT_ROOT:-$WORKDIR/ckpts}   # override to /checkpoints/saadlahrichi/gad_run/ckpts (Lustre, no 1TB quota; writable from compute)
+CKPT=$CKPT_ROOT/$EXP
 LR=${LR:-5e-6}
 EPOCHS=${EPOCHS:-4}
 
