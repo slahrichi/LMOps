@@ -44,6 +44,29 @@ def chat_str(tok, chat):
     return tok.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
 
 
+def judge_vs_refs(llm, tok, transform, questions, candidates, refs):
+    """Win-rate of `candidates` against `refs` under the reused arena judge (position-shuffled)."""
+    prompts, side = [], []
+    for q, c, ref in zip(questions, candidates, refs):
+        ex = transform({"question": q, "response1": c, "response2": ref,
+                        "answer": "1", "extra_info": {}, "data_source": "_all"})
+        prompts.append(chat_str(tok, ex["prompt"]))
+        side.append(int(ex["reward_model"]["ground_truth"]))
+    gen = llm.generate(prompts, SamplingParams(temperature=0.0, max_tokens=2048))
+    inv = {"n_judge": 0, "n_invalid_judge": 0}
+    w = l = iv = 0
+    for g, s in zip(gen, side):
+        pick = extract_judge(g.outputs[0].text, inv)
+        if pick == -1:
+            iv += 1
+        elif pick == s:
+            w += 1
+        else:
+            l += 1
+    return {"wins": w, "losses": l, "invalid": iv,
+            "win_rate": (w / (w + l) if (w + l) else float("nan"))}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gen-dir", required=True, help="dir with {set}_generation_results.jsonl")
@@ -56,6 +79,10 @@ def main():
     ap.add_argument("--tp", type=int, default=2)
     ap.add_argument("--max-model-len", type=int, default=8192)
     ap.add_argument("--out", default=None, help="write per-set results JSON here")
+    ap.add_argument("--teacher-ceiling", action="store_true",
+                    help="also score teacher_response vs the SAME judge reference (upper bound). "
+                         "Only meaningful where teacher_response is the real GPT-5-Chat teacher (lmsys). "
+                         "Requires --reference judge.")
     args = ap.parse_args()
 
     tok = AutoTokenizer.from_pretrained(args.judge_model)
@@ -79,34 +106,32 @@ def main():
         else:
             refs = [r["teacher"] for r in rows]
 
-        # judge prompts (student=response1, reference=response2, answer="1" -> transform tracks student side)
-        j_prompts, student_side = [], []
-        for r, ref in zip(rows, refs):
-            ex = transform({"question": r["question"], "response1": r["student"], "response2": ref,
-                            "answer": "1", "extra_info": {}, "data_source": "_all"})
-            j_prompts.append(chat_str(tok, ex["prompt"]))
-            student_side.append(int(ex["reward_model"]["ground_truth"]))
-        j_gen = llm.generate(j_prompts, SamplingParams(temperature=0.0, max_tokens=2048))
+        # judge student vs reference (position-shuffle handled inside the transform)
+        questions = [r["question"] for r in rows]
+        res = judge_vs_refs(llm, tok, transform, questions, [r["student"] for r in rows], refs)
+        results[name] = {"n": len(rows), **res}
+        print(f"{name:10s} n={len(rows):4d}  win={res['wins']:4d} loss={res['losses']:4d} "
+              f"invalid={res['invalid']:3d}  win_rate={res['win_rate']:.3f}  (ref={args.reference})")
 
-        inv = {"n_judge": 0, "n_invalid_judge": 0}
-        wins = losses = invalid = 0
-        for g, side in zip(j_gen, student_side):
-            pick = extract_judge(g.outputs[0].text, inv)
-            if pick == -1:
-                invalid += 1
-            elif pick == side:
-                wins += 1
+        # teacher ceiling: score the teacher_response vs the SAME judge refs (comparable upper bound).
+        # Only a true GPT-5 ceiling on lmsys; elsewhere teacher_response is the original dataset answer.
+        if args.teacher_ceiling:
+            if args.reference != "judge":
+                print(f"{name:10s} teacher-ceiling SKIPPED (needs --reference judge)")
+            elif not all(r["teacher"].strip() for r in rows):
+                print(f"{name:10s} teacher-ceiling SKIPPED (empty teacher_response)")
             else:
-                losses += 1
-        wr = wins / (wins + losses) if (wins + losses) else float("nan")
-        results[name] = {"n": len(rows), "wins": wins, "losses": losses, "invalid": invalid, "win_rate": wr}
-        print(f"{name:10s} n={len(rows):4d}  win={wins:4d} loss={losses:4d} invalid={invalid:3d}  "
-              f"win_rate={wr:.3f}  (ref={args.reference})")
+                tres = judge_vs_refs(llm, tok, transform, questions, [r["teacher"] for r in rows], refs)
+                results[name]["teacher_ceiling"] = tres
+                note = "" if name == "lmsys" else "  [NB: teacher_response=orig dataset answer, NOT GPT-5]"
+                print(f"{name:10s} TEACHER-CEILING win={tres['wins']:4d} loss={tres['losses']:4d} "
+                      f"invalid={tres['invalid']:3d}  win_rate={tres['win_rate']:.3f}{note}")
 
     if args.out:
         with open(args.out, "w") as f:
             json.dump({"reference": args.reference, "template": args.template,
-                       "sample_idx": args.sample_idx, "results": results}, f, indent=2)
+                       "sample_idx": args.sample_idx, "teacher_ceiling": args.teacher_ceiling,
+                       "results": results}, f, indent=2)
         print(f"wrote {args.out}")
 
 

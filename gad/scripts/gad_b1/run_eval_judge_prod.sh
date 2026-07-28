@@ -23,6 +23,7 @@ STEP=${STEP:?set STEP (e.g. 492)}
 GEN_DIR=${GEN_DIR:-$WORKDIR/eval/$EXP/global_step_${STEP}}
 SETS=${SETS:-lmsys,dolly,vicuna,self-inst}
 REFERENCE=${REFERENCE:-judge}
+TEACHER_CEILING=${TEACHER_CEILING:-0}   # 1 = also score teacher_response vs judge ref (GPT-5 ceiling; meaningful on lmsys only)
 JUDGE=${JUDGE:-/storage/home/saadlahrichi/models/Qwen2.5-72B-Instruct}
 
 echo "===== env ====="
@@ -44,6 +45,7 @@ python $WORKDIR/judge_winrate.py \
     --reference "$REFERENCE" \
     --judge-model "$JUDGE" \
     --tp 2 \
+    $([ "$TEACHER_CEILING" = "1" ] && echo --teacher-ceiling) \
     --out "$GEN_DIR/winrate_${REFERENCE}.json"
 echo ""
 echo "===== done ====="; cat "$GEN_DIR/winrate_${REFERENCE}.json" 2>/dev/null
