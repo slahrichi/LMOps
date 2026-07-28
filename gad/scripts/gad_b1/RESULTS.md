@@ -46,13 +46,16 @@ Does a **bounded replay buffer on GAD's discriminator (D2)** improve adversarial
 | *replay − GAD-base* | *+0.022* | *+0.012* | *+0.001* | *+0.015* |
 | lmsys teacher ceiling (GPT-5) | 0.499 | — | — | — |
 
-### 7.2 val ROUGE-L (eval output vs teacher_output; lmsys = vs GPT-5)
-| arm | lmsys | dolly | vicuna | self-inst | train-val (final) |
+### 7.2 val ROUGE-L
+Two sources: **per-set columns** = computed **post-hoc** from the eval generations (`rouge_score` rougeL-F1 of student greedy `output` vs `teacher_output`, averaged) so it's uniform across all sets *and* all arms incl. the untrained base floor; **`train-val (final)`** = the during-training `val/rouge-L/mean` from logs (lmsys val, trained arms only). They agree where they overlap (validates the post-hoc calc). **Only lmsys `teacher_output` is the GPT-5 teacher → only the lmsys column is "vs teacher"; dolly/vicuna/self-inst columns are overlap vs the *original dataset* answer (a different quantity — do not read as teacher-fidelity).**
+| arm | lmsys (vs GPT-5) | dolly † | vicuna † | self-inst † | train-val (final) |
 |---|---|---|---|---|---|
 | base-Qwen floor | 0.297 | 0.232 | 0.252 | 0.189 | — |
 | SeqKD | 0.359 | 0.245 | 0.244 | 0.230 | 0.359 |
 | GAD-base | 0.340 | 0.270 | 0.267 | 0.255 | 0.346 |
 | GAD-replay | 0.321 | 0.217 | 0.260 | 0.201 | 0.307 |
+
+† vs original dataset answer, not GPT-5.
 
 ### 7.3 Discriminator stability `d_acc_fresh` (GAD arms only; full run, steps 1–492)
 | | GAD-base | GAD-replay |
