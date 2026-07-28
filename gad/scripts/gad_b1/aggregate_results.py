@@ -43,18 +43,35 @@ def log_text(logf):
     return open(p, errors="ignore").read() if (logf and os.path.exists(p)) else ""
 
 def d_acc_series(logf):
-    """Parse UNIQUE {step: d_acc_fresh} (dedupes Ray '[repeated Nx]' duplicate log lines)."""
-    p = f"{LOGS}/{logf}"
-    if not (logf and os.path.exists(p)):
-        return {}
+    """Parse UNIQUE {step: d_acc_fresh}. PREFER the Ray session copy (logs/ray-<jobid>/ — the FULL
+    metric stream through the whole run) over the SLURM .out (whose console capture can freeze
+    mid-run). Falls back to the .out if no ray dir. Dedupes Ray '[repeated Nx]' lines by step."""
+    import glob as _glob
+    files, src = [], None
+    m = re.search(r"-(\d+)\.out$", logf or "")
+    if m:
+        raydir = f"{LOGS}/ray-{m.group(1)}"
+        if os.path.isdir(raydir):
+            files = [f for f in _glob.glob(f"{raydir}/**/*", recursive=True) if os.path.isfile(f)]
+            src = raydir
+    if not files:
+        p = f"{LOGS}/{logf}"
+        files, src = ([p] if (logf and os.path.exists(p)) else []), p
     d = {}
-    for line in open(p, errors="ignore"):
-        if "critic/d_acc_fresh" not in line:
+    for f in files:
+        try:
+            txt = open(f, errors="ignore").read()
+        except Exception:
             continue
-        ms = re.search(r"training/global_step:([0-9]+)", line) or re.search(r"\bstep:([0-9]+)\b", line)
-        md = re.search(r"critic/d_acc_fresh:([0-9.]+)", line)
-        if ms and md:
-            d[int(ms.group(1))] = float(md.group(1))
+        if "d_acc_fresh" not in txt:
+            continue
+        for line in txt.splitlines():
+            if "critic/d_acc_fresh" not in line:
+                continue
+            ms = re.search(r"training/global_step:([0-9]+)", line) or re.search(r"\bstep:([0-9]+)\b", line)
+            md = re.search(r"critic/d_acc_fresh:([0-9.]+)", line)
+            if ms and md:
+                d[int(ms.group(1))] = float(md.group(1))
     return d
 
 def d_acc_stats(series, keys=None):
@@ -100,4 +117,5 @@ if len(gad_arms) == 2:
         for label, s in gad_arms.items():
             a = d_acc_stats(s, common)
             print(f"  {label:16s}mean={a['mean']:.3f} std={a['std']:.3f} min={a['mn']:.3f} <0.5:{a['lt5']} <0.7:{a['lt7']}")
-        print("  NOTE: metrics logging froze mid-run (Ray stdout stall) at different steps per arm; both trained fully to gs492.")
+        print("  NOTE: d_acc read from Ray session logs (logs/ray-<jobid>/) = FULL stream through gs492 "
+              "(SLURM .out froze mid-run but the ray copy is complete).")
