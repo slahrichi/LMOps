@@ -15,6 +15,8 @@
 #   Usage: CKPT_ROOT=/checkpoints/$USER/gad_run/ckpts EXP=fs33-gad-replay STEP=492 \
 #          sbatch run_eval_gen_prod.sh
 #   Vars: VAL_SETS="lmsys dolly vicuna self-inst" (default all 4), N=8, GEN_TEMP=0.8
+#   MODEL_PATH=<hf dir> to eval an external/pre-distillation model directly (skips FSDP merge),
+#     e.g. base Qwen2.5-7B-Instruct: EXP=base-qwen7b STEP=0 MODEL_PATH=/checkpoints/jasonjx/models/Qwen2.5-7B-Instruct
 set -euo pipefail
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
@@ -48,19 +50,25 @@ export RAY_TMPDIR=/tmp/rj${SLURM_JOB_ID}; mkdir -p $RAY_TMPDIR $WORKDIR/tmp $OUT
 trap 'cp -r $RAY_TMPDIR $WORKDIR/logs/ray-${SLURM_JOB_ID} 2>/dev/null || true' EXIT
 ulimit -n 65536 || true
 
-echo "===== 2/3: verl branch = eval + merge actor FSDP->HF ====="
+echo "===== 2/3: verl branch = eval + resolve model ====="
 cd $VERL && git checkout eval 2>&1 | tail -1
 echo "verl branch: $(git branch --show-current)"
-[ -d "$CKPT/actor" ] || { echo "ERROR: $CKPT/actor not found"; exit 1; }
-cd $LMOPS/gad
-if ls "$CKPT/actor/huggingface"/*.safetensors >/dev/null 2>&1; then
-  echo "  actor already merged, skipping"
+if [ -n "${MODEL_PATH:-}" ]; then
+  # direct HF model (e.g. pre-distillation base Qwen2.5-7B-Instruct) — no FSDP merge
+  echo "  using direct MODEL_PATH=$MODEL_PATH (no merge)"
 else
-  mkdir -p "$CKPT/actor/huggingface/"
-  find "$CKPT/actor/" -maxdepth 1 -type f ! -name "*.pt" -exec cp {} "$CKPT/actor/huggingface/" \;
-  python tools/merge_model2hf.py --local_dir "$CKPT/actor"
+  [ -d "$CKPT/actor" ] || { echo "ERROR: $CKPT/actor not found"; exit 1; }
+  cd $LMOPS/gad
+  if ls "$CKPT/actor/huggingface"/*.safetensors >/dev/null 2>&1; then
+    echo "  actor already merged, skipping"
+  else
+    mkdir -p "$CKPT/actor/huggingface/"
+    find "$CKPT/actor/" -maxdepth 1 -type f ! -name "*.pt" -exec cp {} "$CKPT/actor/huggingface/" \;
+    python tools/merge_model2hf.py --local_dir "$CKPT/actor"
+  fi
+  MODEL_PATH=$CKPT/actor/huggingface
 fi
-MODEL_PATH=$CKPT/actor/huggingface
+cd $LMOPS/gad
 
 echo "===== 3/3: generate | sets='$VAL_SETS' | n=$N temp=$GEN_TEMP -> $OUTDIR ====="
 for VAL_DATA in $VAL_SETS; do
