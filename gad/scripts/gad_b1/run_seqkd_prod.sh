@@ -95,9 +95,9 @@ python3 -m verl.trainer.main_ppo \
     trainer.experiment_name=$EXP \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=200 \
-    trainer.max_actor_ckpt_to_keep=2 \
-    trainer.max_critic_ckpt_to_keep=2 \
+    trainer.save_freq=${SAVE_FREQ:-100} \
+    trainer.max_actor_ckpt_to_keep=${KEEP:-20} \
+    trainer.max_critic_ckpt_to_keep=${KEEP:-20} \
     trainer.test_freq=50 \
     trainer.resume_mode=auto \
     trainer.default_hdfs_dir=null \
