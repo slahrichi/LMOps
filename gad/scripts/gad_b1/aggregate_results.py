@@ -42,12 +42,29 @@ def log_text(logf):
     p = f"{LOGS}/{logf}"
     return open(p, errors="ignore").read() if (logf and os.path.exists(p)) else ""
 
-def d_acc_stats(txt):
-    v = [float(x) for x in re.findall(r"critic/d_acc_fresh:([0-9.]+)", txt)]
+def d_acc_series(logf):
+    """Parse UNIQUE {step: d_acc_fresh} (dedupes Ray '[repeated Nx]' duplicate log lines)."""
+    p = f"{LOGS}/{logf}"
+    if not (logf and os.path.exists(p)):
+        return {}
+    d = {}
+    for line in open(p, errors="ignore"):
+        if "critic/d_acc_fresh" not in line:
+            continue
+        ms = re.search(r"training/global_step:([0-9]+)", line) or re.search(r"\bstep:([0-9]+)\b", line)
+        md = re.search(r"critic/d_acc_fresh:([0-9.]+)", line)
+        if ms and md:
+            d[int(ms.group(1))] = float(md.group(1))
+    return d
+
+def d_acc_stats(series, keys=None):
+    keys = sorted(series) if keys is None else keys
+    v = [series[k] for k in keys if k in series]
     if not v:
         return None
     return dict(n=len(v), mean=st.mean(v), std=st.pstdev(v), mn=min(v),
-                lt5=sum(x < 0.5 for x in v), lt7=sum(x < 0.7 for x in v))
+                lt5=sum(x < 0.5 for x in v), lt7=sum(x < 0.7 for x in v),
+                lo=(min(keys) if keys else None), hi=(max(keys) if keys else None))
 
 def final_val_rouge(txt):
     m = re.findall(r"val/rouge-L/mean:([0-9.]+)", txt)
@@ -70,10 +87,17 @@ for label, d, logf in ARMS:
     print(f"{label:18s}{rl}   " + (f"{fv:.3f}" if fv is not None else "--"))
 
 print("\n=== 3) d_acc_fresh  (discriminator teacher-vs-student acc; GAD arms only; replay hyp: tighter+higher) ===")
-for label, d, logf in ARMS:
-    s = d_acc_stats(log_text(logf))
-    if s is None:
-        print(f"{label:18s}(no discriminator)")
-    else:
-        print(f"{label:18s}mean={s['mean']:.3f}  std={s['std']:.3f}  min={s['mn']:.3f}  "
-              f"dips<0.5:{s['lt5']}  <0.7:{s['lt7']}  (n={s['n']})")
+series = {label: d_acc_series(logf) for label, d, logf in ARMS if logf and "gad-" in (logf or "")}
+gad_arms = {k: v for k, v in series.items() if v}
+for label, s in gad_arms.items():
+    st_ = d_acc_stats(s)
+    print(f"{label:18s}own-range[{st_['lo']}-{st_['hi']}]: mean={st_['mean']:.3f} std={st_['std']:.3f} min={st_['mn']:.3f} <0.5:{st_['lt5']} <0.7:{st_['lt7']} n={st_['n']}")
+if len(gad_arms) == 2:
+    (la, sa), (lb, sb) = list(gad_arms.items())
+    common = sorted(set(sa) & set(sb))
+    if common:
+        print(f"  --- ALIGNED over common steps {common[0]}-{common[-1]} (n={len(common)}) [the paper-grade comparison] ---")
+        for label, s in gad_arms.items():
+            a = d_acc_stats(s, common)
+            print(f"  {label:16s}mean={a['mean']:.3f} std={a['std']:.3f} min={a['mn']:.3f} <0.5:{a['lt5']} <0.7:{a['lt7']}")
+        print("  NOTE: metrics logging froze mid-run (Ray stdout stall) at different steps per arm; both trained fully to gs492.")
