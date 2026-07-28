@@ -1,28 +1,41 @@
 #!/usr/bin/env python
-"""GAD B1 eval stage-2: LLM-judge win-rate scorer (Qwen2.5-72B).
+"""GAD B1 eval stage-2: paper-faithful automatic score (paper App. A.3, Figures 7-8; [GDWH24]).
 
-REUSES the eval-branch judge code rather than reinventing it:
-  - verl.utils.dataset.prompt_templates.get_online_transform_func  -> exact judge prompt
-    (MYPROMPT2: order/length-bias-mitigated "\\boxed{Assistant N}") + internal position-shuffle
-  - deepscaler.rewards.judge_extractor.extract_judge               -> verdict parser (1/2/-1)
+The judge (GPT-4o in the paper; Qwen2.5-72B here) rates the student and a reference answer,
+each on a 1-10 scale (helpfulness/relevance/accuracy/detail), via the Figure-8 prompt. The
+reported score = mean over examples of  student_score / (student_score + reference_score).
+Reference = judge-model-generated answer (README protocol) or teacher_response (--reference teacher).
+Generation is greedy (matches paper). Assistant order is randomized per example to remove order bias.
 
-Pipeline per eval set (reads {set}_generation_results.jsonl = {input, output, teacher_output}):
-  student answer  = output[sample_idx]
-  reference       = teacher_output (GPT-5-Chat; --reference teacher)  OR
-                    a Qwen-72B-generated answer (--reference judge, README protocol)
-  judge           = Qwen-72B scores student-vs-reference; the transform shuffles positions and
-                    tracks the student's side via reward_model.ground_truth, so
-                    student_win iff extract_judge(verdict) == that side.
-Win-rate = wins / (wins + losses); ties/invalid reported separately.
+NOTE: this is a Qwen-72B reimplementation of the paper's GPT-4o eval — absolute scores are not
+byte-comparable to the paper (different judge model), but the arm-vs-arm A/B is internally consistent.
 """
-import argparse, json, os
+import argparse, json, os, re, random
+import statistics as st
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
-from verl.utils.dataset.prompt_templates import get_online_transform_func
-from deepscaler.rewards.judge_extractor import extract_judge
+
+# Figure 7: prompt wrapper (how the instruction is presented) — used to (re)generate the reference.
+FIG7 = ("Below is an instruction that describes a task.\n"
+        "Write a response that appropriately completes the request.\n"
+        "### Instruction:\n{instr}\n### Response:")
+
+# Figure 8: the GPT-4o feedback request (verbatim from paper App. A.3).
+FIG8 = (
+    "We would like to request your feedback on the performance of two AI assistants in response "
+    "to the user instruction and input displayed above.\n"
+    "Please rate the helpfulness, relevance, accuracy, and level of detail of their responses. "
+    "Each assistant receives an overall score on a scale of 1 to 10, where a higher score indicates "
+    "better overall performance.\n"
+    "Please first output a single line containing only two values indicating the scores for "
+    "Assistant 1 and 2, respectively. The two scores are separated by a space.\n"
+    "In the subsequent line, please provide a comprehensive explanation of your evaluation, avoiding "
+    "any potential bias and ensuring that the order in which the responses were presented does not "
+    "affect your judgment."
+)
 
 
-def load_gen(path, sample_idx):
+def load_gen(path):
     rows = []
     with open(path) as f:
         for line in f:
@@ -31,107 +44,138 @@ def load_gen(path, sample_idx):
             r = json.loads(line)
             out, teach = r["output"], r.get("teacher_output", "")
             if isinstance(out, list):
-                out = out[sample_idx] if sample_idx < len(out) else out[0]
+                out = out[0] if out else ""
             if isinstance(teach, list):
                 teach = teach[0] if teach else ""
-            rows.append({"question": r["input"], "student": out or "", "teacher": teach or ""})
+            rows.append({"input": r["input"], "student": out or "", "teacher": teach or ""})
     return rows
 
 
-def chat_str(tok, chat):
-    # transform returns [{user},{system}]; put system first for correct rendering
-    chat = sorted(chat, key=lambda m: 0 if m["role"] == "system" else 1)
-    return tok.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+def clean_instruction(inp):
+    """Extract the instruction (+input) from the flattened gen prompt for the [Question] slot."""
+    if "### Instruction:" in inp:
+        s = inp.split("### Instruction:", 1)[1]
+        s = s.split("### Response:", 1)[0]
+        return s.strip()
+    # fallback: strip role markers
+    return inp.replace("system\nYou are a helpful assistant.\nuser\n", "").strip()
 
 
-def judge_vs_refs(llm, tok, transform, questions, candidates, refs):
-    """Win-rate of `candidates` against `refs` under the reused arena judge (position-shuffled)."""
-    prompts, side = [], []
-    for q, c, ref in zip(questions, candidates, refs):
-        ex = transform({"question": q, "response1": c, "response2": ref,
-                        "answer": "1", "extra_info": {}, "data_source": "_all"})
-        prompts.append(chat_str(tok, ex["prompt"]))
-        side.append(int(ex["reward_model"]["ground_truth"]))
-    gen = llm.generate(prompts, SamplingParams(temperature=0.0, max_tokens=2048))
-    inv = {"n_judge": 0, "n_invalid_judge": 0}
-    w = l = iv = 0
-    for g, s in zip(gen, side):
-        pick = extract_judge(g.outputs[0].text, inv)
-        if pick == -1:
-            iv += 1
-        elif pick == s:
-            w += 1
-        else:
-            l += 1
-    return {"wins": w, "losses": l, "invalid": iv,
-            "win_rate": (w / (w + l) if (w + l) else float("nan"))}
+def judge_prompt(tok, question, ans1, ans2):
+    body = (f"[Question]\n{question}\n\n"
+            f"[The Start of Assistant 1's Answer]\n{ans1}\n[The End of Assistant 1's Answer]\n\n"
+            f"[The Start of Assistant 2's Answer]\n{ans2}\n[The End of Assistant 2's Answer]\n\n"
+            f"{FIG8}")
+    return tok.apply_chat_template([{"role": "user", "content": body}],
+                                   add_generation_prompt=True, tokenize=False)
+
+
+def parse_scores(text):
+    """Extract (s1, s2) robustly. Prefers the instructed 'N M' first line."""
+    t = text.strip()
+    # 1) instructed format: a line that is exactly two numbers
+    for line in t.splitlines():
+        m = re.match(r"^\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s*$", line.strip())
+        if m:
+            return float(m.group(1)), float(m.group(2))
+    # 2) explicit 'Assistant 1: X ... Assistant 2: Y'
+    m1 = re.search(r"[Aa]ssistant\s*1\D{0,4}(\d+(?:\.\d+)?)", t)
+    m2 = re.search(r"[Aa]ssistant\s*2\D{0,4}(\d+(?:\.\d+)?)", t)
+    if m1 and m2:
+        return float(m1.group(1)), float(m2.group(1))
+    # 3) fallback: first line containing >=2 numbers
+    for line in t.splitlines():
+        nums = re.findall(r"\d+(?:\.\d+)?", line)
+        if len(nums) >= 2:
+            return float(nums[0]), float(nums[1])
+    nums = re.findall(r"\d+(?:\.\d+)?", t)
+    return (float(nums[0]), float(nums[1])) if len(nums) >= 2 else None
+
+
+def score_candidates(llm, tok, questions, cands, refs, rng, max_tokens=1024):
+    """Paper score for `cands` vs `refs`: mean student/(student+ref), order-randomized."""
+    prompts, cand_is_a1 = [], []
+    for q, c, r in zip(questions, cands, refs):
+        a1_is_cand = rng.random() < 0.5
+        a1, a2 = (c, r) if a1_is_cand else (r, c)
+        prompts.append(judge_prompt(tok, q, a1, a2))
+        cand_is_a1.append(a1_is_cand)
+    gen = llm.generate(prompts, SamplingParams(temperature=0.0, max_tokens=max_tokens))
+    ratios, csc, rsc, bad = [], [], [], 0
+    for g, a1_is_cand in zip(gen, cand_is_a1):
+        sc = parse_scores(g.outputs[0].text)
+        if sc is None:
+            bad += 1; continue
+        s1, s2 = sc
+        cs, rs = (s1, s2) if a1_is_cand else (s2, s1)
+        if cs + rs <= 0:
+            bad += 1; continue
+        ratios.append(cs / (cs + rs)); csc.append(cs); rsc.append(rs)
+    return {"n_scored": len(ratios), "n_unparsed": bad,
+            "score": (st.mean(ratios) if ratios else float("nan")),
+            "mean_student_1to10": (st.mean(csc) if csc else float("nan")),
+            "mean_ref_1to10": (st.mean(rsc) if rsc else float("nan"))}
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--gen-dir", required=True, help="dir with {set}_generation_results.jsonl")
+    ap.add_argument("--gen-dir", required=True)
     ap.add_argument("--sets", default="lmsys,dolly,vicuna,self-inst")
     ap.add_argument("--judge-model", default="/storage/home/saadlahrichi/models/Qwen2.5-72B-Instruct")
-    ap.add_argument("--reference", choices=["teacher", "judge"], default="judge",
-                    help="teacher=teacher_output col (GPT-5 on lmsys); judge=Qwen-72B-generated (paper README)")
-    ap.add_argument("--template", default="my_prompt2")
-    ap.add_argument("--sample-idx", type=int, default=0)
+    ap.add_argument("--reference", choices=["judge", "teacher"], default="judge",
+                    help="judge=judge-model-generated ref (paper README); teacher=teacher_output col (GPT-5 on lmsys)")
     ap.add_argument("--tp", type=int, default=2)
     ap.add_argument("--max-model-len", type=int, default=8192)
-    ap.add_argument("--out", default=None, help="write per-set results JSON here")
+    ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--teacher-ceiling", action="store_true",
-                    help="also score teacher_response vs the SAME judge reference (upper bound). "
-                         "Only meaningful where teacher_response is the real GPT-5-Chat teacher (lmsys). "
-                         "Requires --reference judge.")
+                    help="also score teacher_response vs same refs (GPT-5 ceiling; lmsys only meaningful). Needs --reference judge.")
+    ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
     tok = AutoTokenizer.from_pretrained(args.judge_model)
     llm = LLM(model=args.judge_model, tensor_parallel_size=args.tp,
               gpu_memory_utilization=0.90, max_model_len=args.max_model_len, dtype="bfloat16")
-    transform = get_online_transform_func(args.template, "_all", shuffle_response_order=True, random_seed=42)
+    rng = random.Random(args.seed)
 
     results = {}
     for name in [s.strip() for s in args.sets.split(",") if s.strip()]:
         path = os.path.join(args.gen_dir, f"{name}_generation_results.jsonl")
         if not os.path.exists(path):
             print(f"SKIP {name}: {path} not found"); continue
-        rows = load_gen(path, args.sample_idx)
+        rows = load_gen(path)
+        questions = [clean_instruction(r["input"]) for r in rows]
 
-        # reference answers
-        if args.reference == "judge":
-            ref_prompts = [tok.apply_chat_template([{"role": "user", "content": r["question"]}],
-                                                   add_generation_prompt=True, tokenize=False) for r in rows]
-            ref_gen = llm.generate(ref_prompts, SamplingParams(temperature=0.7, top_p=0.95, max_tokens=1536))
+        if args.reference == "judge":  # greedy reference from the judge model (paper: GPT-4o generates it)
+            ref_prompts = [tok.apply_chat_template([{"role": "user", "content": FIG7.format(instr=q)}],
+                                                   add_generation_prompt=True, tokenize=False) for q in questions]
+            ref_gen = llm.generate(ref_prompts, SamplingParams(temperature=0.0, max_tokens=1536))
             refs = [g.outputs[0].text for g in ref_gen]
         else:
             refs = [r["teacher"] for r in rows]
 
-        # judge student vs reference (position-shuffle handled inside the transform)
-        questions = [r["question"] for r in rows]
-        res = judge_vs_refs(llm, tok, transform, questions, [r["student"] for r in rows], refs)
+        res = score_candidates(llm, tok, questions, [r["student"] for r in rows], refs, rng)
         results[name] = {"n": len(rows), **res}
-        print(f"{name:10s} n={len(rows):4d}  win={res['wins']:4d} loss={res['losses']:4d} "
-              f"invalid={res['invalid']:3d}  win_rate={res['win_rate']:.3f}  (ref={args.reference})")
+        print(f"{name:10s} n={len(rows):4d}  score={res['score']:.3f}  "
+              f"(student {res['mean_student_1to10']:.2f} vs ref {res['mean_ref_1to10']:.2f} /10, "
+              f"unparsed={res['n_unparsed']})")
 
-        # teacher ceiling: score the teacher_response vs the SAME judge refs (comparable upper bound).
-        # Only a true GPT-5 ceiling on lmsys; elsewhere teacher_response is the original dataset answer.
         if args.teacher_ceiling:
             if args.reference != "judge":
                 print(f"{name:10s} teacher-ceiling SKIPPED (needs --reference judge)")
             elif not all(r["teacher"].strip() for r in rows):
                 print(f"{name:10s} teacher-ceiling SKIPPED (empty teacher_response)")
             else:
-                tres = judge_vs_refs(llm, tok, transform, questions, [r["teacher"] for r in rows], refs)
-                results[name]["teacher_ceiling"] = tres
+                tc = score_candidates(llm, tok, questions, [r["teacher"] for r in rows], refs, rng)
+                results[name]["teacher_ceiling"] = tc
                 note = "" if name == "lmsys" else "  [NB: teacher_response=orig dataset answer, NOT GPT-5]"
-                print(f"{name:10s} TEACHER-CEILING win={tres['wins']:4d} loss={tres['losses']:4d} "
-                      f"invalid={tres['invalid']:3d}  win_rate={tres['win_rate']:.3f}{note}")
+                print(f"{name:10s} TEACHER-CEILING score={tc['score']:.3f} "
+                      f"(teacher {tc['mean_student_1to10']:.2f} vs ref {tc['mean_ref_1to10']:.2f} /10){note}")
 
     if args.out:
         with open(args.out, "w") as f:
-            json.dump({"reference": args.reference, "template": args.template,
-                       "sample_idx": args.sample_idx, "teacher_ceiling": args.teacher_ceiling,
-                       "results": results}, f, indent=2)
+            json.dump({"metric": "student/(student+reference), 1-10 dual-score (paper App.A.3 Fig8)",
+                       "judge": os.path.basename(args.judge_model), "reference": args.reference,
+                       "teacher_ceiling": args.teacher_ceiling, "seed": args.seed, "results": results}, f, indent=2)
         print(f"wrote {args.out}")
 
 
