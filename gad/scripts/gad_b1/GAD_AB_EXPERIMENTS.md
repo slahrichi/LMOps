@@ -1,6 +1,6 @@
 # GAD A/B Experiments — Full-Scale Replay-Buffer Study (SLURM / 8×H200)
 
-**Status doc — last updated 2026-07-27.** Live job status is refreshed hourly into the
+**Status doc — last updated 2026-07-28.** Live job status is refreshed every 30 min into the
 `gad-sbatch-ab-campaign` agent memory; this doc describes the *design and mechanics*.
 
 ---
@@ -77,13 +77,8 @@ own `default_local_dir`, so a preempted/crashed arm resumes from its own last ch
 
 ## 4. Checkpointing policy
 
-- **`save_freq` = 200** on all four arms, `max_actor_ckpt_to_keep = max_critic_ckpt_to_keep = 2`.
-  (History: the 50% arms first ran on the preemptible `h200_mrs_shared` QOS with `save_freq=50`
-  to bound requeue loss; after repeated preemption they were **moved to `h200_dev`
-  (non-preemptible)** and reverted to `save_freq=200`.) Each 7B `actor+critic+optimizer` save
-  ≈ **150 GB**; the verl default (keep all) once exhausted disk mid-run. `keep-last-2` bounds
-  each stage to ~300 GB and leaves one known-good fallback if a save is corrupted mid-write.
-  **Prune a completed arm to its final `gs492` only** (~165 GB) as soon as it finishes.
+- **WHERE (2026-07-27):** write ckpts to **Lustre** via `CKPT_ROOT=/checkpoints/$USER/gad_run/ckpts` on every launcher — `/home` has a **hard 1 TB per-user quota** and a save that hits it dies corrupt (killed both SeqKD arms). Lustre is 200 T+, no quota, but **writable only from compute nodes** (login is read-only). ZFS snapshots on `/home` retain deleted files against quota for 24–48 h, so `rm` gives no instant relief — stop *writing* to /home instead. (Currently 33-base + 50-warmup still write to /home; they predate the switch.)
+- **`save_freq`**: 200 on the GAD arms (`h200_dev`, non-preemptible); **100 on the rerun SeqKD arms** (`h200_mrs_shared`, preemptible → smaller requeue loss). `max_actor_ckpt_to_keep = max_critic_ckpt_to_keep = 2`.
 - **A save that dies on a full disk produces a corrupt checkpoint** (see §6). Watch free
   space; a save briefly holds ~3 checkpoints (write-then-prune) ≈ 450–540 GB transient.
 
@@ -128,21 +123,25 @@ ls -1dt ckpts/<EXP>/global_step_*/ | head -1 ; stat -c '%y' <that dir>   # recen
 High GPU util or a fresh checkpoint mtime ⇒ it's training; leave it alone. Only kill +
 resume (from the last `global_step_N`) if GPUs are idle AND no recent checkpoint.
 
-## 7. Current status (2026-07-27 ~16:34 UTC)
+## 7. Current status (2026-07-28 ~00:15 UTC)
 
 | Arm | Job | State | Progress |
 |-----|-----|-------|----------|
-| **33-replay** (cap 4096) | 1565446 | ✅ **COMPLETED** | 492/492; pruned to final `gs492`; val rouge-L **0.307** |
-| **33-base** (cap 0) | 1569064 | RUNNING (h200-040-026) | ~step **299/492 (~61%)**, live `d_acc_fresh`, ~13h left; gs200 intact |
-| **50-warmup** | 1571542 | RUNNING (**h200_dev**, h200-229-188) | ~step **169/374 (~45%)**, non-preemptible |
-| **50-base** (cap 0) | 1571543 | PENDING (Dependency) | h200_dev; waits on 50-warmup |
-| **50-replay** (cap 4096) | 1571544 | PENDING (Dependency) | h200_dev; waits on 50-warmup |
+| **33-replay** (cap 4096) | 1565446 | ✅ **COMPLETED** | 492/492; val rouge-L **0.307**; **migrated to Lustre** `/checkpoints/$USER/gad_run/ckpts/fs33-gad-replay` |
+| **33-base** (cap 0) | 1569064 | RUNNING (h200-040-026) | ~step **400+/492 (~81%)**, gs400 saved clean; ~7h left; on /home |
+| **50-warmup** | 1571542 | RUNNING (**h200_dev**, h200-229-188) | ~step **249/374 (~67%)**, non-preemptible; on /home |
+| **50-base** (cap 0) | **1575556** | PENDING (Dependency) | h200_dev, `afterok:1571542`, → **Lustre** (CKPT_ROOT) |
+| **50-replay** (cap 4096) | **1575557** | PENDING (Dependency) | h200_dev, `afterok:1571542`, → **Lustre** |
+| **fs33-seqkd** | **1575684** | RUNNING (h200_mrs_shared) | rerun after quota-crash; → Lustre, `save_freq=100` |
+| **fs50-seqkd** | **1575685** | PENDING (h200_mrs_shared) | rerun; → Lustre |
+| **eval-smoke** (33-replay, vicuna) | **1575686** | PENDING (h200_mrs_shared) | validates gen→judge before full 4-set run |
 
 Notes:
-- **33-replay finished clean** (ExitCode 0:0). Its buffered `d_acc_fresh` flushed on exit — full trajectory captured. `gs492` verified intact (24/24 `.pt`, 8 xstate), then pruned to gs492-only.
-- **33-base** is the restart of 1565445 (which died on a disk-full checkpoint save). Runs with `PYTHONUNBUFFERED=1` → live metrics; its gs200 (the exact save the original corrupted on) landed **intact**.
-- **50% chain was moved shared → `h200_dev`** after repeated preemption on shared; now non-preemptible, `save_freq=200`. IDs are the *current* ones above (earlier 1567822/823/824 were cancelled in the move).
-- Disk healthy: ckpts ~521 GB, FSx ~13 TB free; tripwire armed.
+- **STORAGE MODEL CHANGED (2026-07-27):** `/home` is FSx-OpenZFS with a **hard 1 TB per-user quota** (NOT the shared-FSx-fills story below in older revs). Ckpts must go to **Lustre** (`/checkpoints/$USER` or `/fsx/$USER`, 200 T+, no quota, writable from compute nodes only) via the new `CKPT_ROOT` env var on all launchers. See RUNBOOK §0/§5.
+- **Both SeqKD arms FAILED on the quota** (1574491/1574492, exit 1:0 — fs33-seqkd died writing its gs400 save). Rerun to Lustre on preemptible `h200_mrs_shared` with `save_freq=100` (`resume_mode=auto` recovers on preemption).
+- **50-arms 1571543/44 were cancelled + resubmitted** as 1575556/57 pointed at Lustre (the originals would have quota-crashed on first save).
+- **33-replay migrated to Lustre** (65 files byte-verified) + `/home` copy removed; 179 GB of dead seqkd partials cleaned. `/home` ckpts ~521 GB — but ZFS snapshots hold ~500 GB of recently-deleted files against quota for 24–48 h, so effective headroom is thin until they age off and the two /home arms finish.
+- Live status refreshed every 30 min into the `gad-sbatch-ab-campaign` agent memory (watcher job).
 
 ### 7.1 Preliminary 33% read (steps 1–212 overlap; PRELIMINARY, n=1)
 
@@ -159,12 +158,15 @@ Comparing the two 33% arms over the steps both have completed (both resumed from
 - **Not a quality verdict:** val rouge-L is a wash (base ~0.32–0.34 vs replay 0.307 — a weak proxy anyway). Real read = win-rate at end.
 - Confirm with: 33-base completion, the win-rate eval, and the 50% replicate.
 
-## 8. Planned follow-ups
+## 8. Follow-ups
 
-- **SeqKD baseline** (paper's sequence-level KD — the number GAD must beat): `run_seqkd_prod.sh` = teacher-forcing SFT of the **base** 7B on GPT-5-Chat responses (branch `seqkd`, `compute_sft_loss`; no warmup/discriminator/GRPO), lr 5e-6, 4 epochs, on the **same 33%/50% subsets**. Submitted 2026-07-27: `fs33-seqkd` (1574491), `fs50-seqkd` (1574492) on `h200_mrs_2_high`. Turns each fraction into a **3-way comparison — SeqKD vs GAD-base vs GAD-replay** on identical data. SeqKD has no `d_acc_fresh` (no discriminator); compare via val rouge-L + win-rate.
-- **Replay sweep** (after first A/B results): `capacity ∈ {0, 1024, 4096, 16384}` ×
-  `rho ∈ {0.25, 0.5}` × `strategy ∈ {uniform, recency-weighted (λ=1e-3)}`.
-- **Eval**: Qwen2.5-72B chat win-rate (+ math accuracy for the multi-aspect line).
+- **SeqKD baseline** (paper's sequence-level KD — the number GAD must beat): `run_seqkd_prod.sh` = teacher-forcing SFT of the **base** 7B on GPT-5-Chat responses (branch `seqkd`, `compute_sft_loss`; no warmup/discriminator/GRPO), lr 5e-6, 4 epochs, on the **same 33%/50% subsets**. Config verified paper-faithful vs `scripts/train/gpt5-chat-filtered-7b-seqkd-lr5e-6.sh`. First attempt (1574491/1574492) **crashed on the /home quota**; **rerun to Lustre** as `fs33-seqkd 1575684` / `fs50-seqkd 1575685` (`h200_mrs_shared`, `save_freq=100`). Turns each fraction into a **3-way comparison — SeqKD vs GAD-base vs GAD-replay**. SeqKD has no `d_acc_fresh`; compare via win-rate (+ rouge-L).
+- **Eval — BUILT (`scripts/gad_b1/`), see RUNBOOK §. Qwen2.5-72B win-rate:**
+  - 4 benchmark sets ready as content-parquets: `data/{lmsys,dolly,vicuna,self-inst}_test.parquet` (479/500/80/252). `convert_eval_sets.py` builds dolly/vicuna/self-inst from MiniLLM-style jsonl.
+  - **Stage-1 gen** `run_eval_gen_prod.sh` — verl `eval` branch, `main_ppo val_only`, 4-set loop, n=8 t0.8 (mirrors `scripts/generate/generate.sh`), `CKPT_ROOT`/Lustre; dumps `{set}_generation_results.jsonl` = `{input,output,teacher_output}`.
+  - **Stage-2 judge** `judge_winrate.py` + `run_eval_judge_prod.sh` — Qwen2.5-72B (TP=2). **Reuses** the eval-branch `get_online_transform_func` (MYPROMPT2 judge, internal position-shuffle) + `extract_judge`. Reference = **judge-generated** (Qwen-72B answers) for all 4 sets (README protocol; DECISION 2026-07-27). Win-rate = wins/(wins+losses).
+  - Validation path: vicuna smoke (gen→judge) → then full 4-set on 33-replay, then 33-base + seqkd → comparison table.
+- **Replay sweep** (after first A/B results): `capacity ∈ {0, 1024, 4096, 16384}` × `rho ∈ {0.25, 0.5}` × `strategy ∈ {uniform, recency-weighted (λ=1e-3)}`.
 
 ---
 *Files: launchers `run_{warmup,gad}_prod.sh`; watcher `watch_fullscale.sh`; data
