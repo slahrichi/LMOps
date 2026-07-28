@@ -70,7 +70,7 @@ for VAL_DATA in $VAL_SETS; do
   python3 -m verl.trainer.main_ppo \
       algorithm.adv_estimator=grpo \
       data.prompt_key=content \
-      data.train_files=$VAL \
+      data.train_files=$WORKDIR/data/lmsys_test-00000-of-00001.parquet \
       data.val_files=$VAL \
       data.train_batch_size=256 \
       data.val_batch_size=600 \
