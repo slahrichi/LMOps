@@ -14,7 +14,7 @@
 # (judge_winrate.py, Qwen2.5-72B).
 #   Usage: CKPT_ROOT=/checkpoints/$USER/gad_run/ckpts EXP=fs33-gad-replay STEP=492 \
 #          sbatch run_eval_gen_prod.sh
-#   Vars: VAL_SETS="lmsys dolly vicuna self-inst" (default all 4), N=8, TEMP=0.8
+#   Vars: VAL_SETS="lmsys dolly vicuna self-inst" (default all 4), N=8, GEN_TEMP=0.8
 set -euo pipefail
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
@@ -26,7 +26,7 @@ STEP=${STEP:?set STEP (checkpoint global_step, e.g. 492)}
 CKPT_ROOT=${CKPT_ROOT:-$WORKDIR/ckpts}          # Lustre for prod arms: /checkpoints/$USER/gad_run/ckpts
 VAL_SETS=${VAL_SETS:-"lmsys dolly vicuna self-inst"}
 N=${N:-8}
-TEMP=${TEMP:-0.8}
+GEN_TEMP=${GEN_TEMP:-0.8}   # NB: not TEMP — the env block below exports TEMP=$WORKDIR/tmp (tempdir), which would clobber it
 CKPT=$CKPT_ROOT/$EXP/global_step_${STEP}
 OUTDIR=$WORKDIR/eval/$EXP/global_step_${STEP}
 
@@ -62,7 +62,7 @@ else
 fi
 MODEL_PATH=$CKPT/actor/huggingface
 
-echo "===== 3/3: generate | sets='$VAL_SETS' | n=$N temp=$TEMP -> $OUTDIR ====="
+echo "===== 3/3: generate | sets='$VAL_SETS' | n=$N temp=$GEN_TEMP -> $OUTDIR ====="
 for VAL_DATA in $VAL_SETS; do
   VAL=$(valfile "$VAL_DATA")
   [ -n "$VAL" ] && [ -f "$VAL" ] || { echo "SKIP $VAL_DATA: parquet not found ($VAL)"; continue; }
@@ -95,7 +95,7 @@ for VAL_DATA in $VAL_SETS; do
       actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
       actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
       actor_rollout_ref.rollout.name=vllm \
-      actor_rollout_ref.rollout.temperature=$TEMP \
+      actor_rollout_ref.rollout.temperature=$GEN_TEMP \
       actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
       actor_rollout_ref.rollout.n=$N \
       actor_rollout_ref.rollout.enforce_eager=False \
