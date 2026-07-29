@@ -38,6 +38,9 @@ valfile() { case "$1" in
   dolly)     echo "$WORKDIR/data/dolly_test.parquet" ;;
   vicuna)    echo "$WORKDIR/data/vicuna_test.parquet" ;;
   self-inst) echo "$WORKDIR/data/self-inst_test.parquet" ;;
+  gsm8k)     echo "$WORKDIR/data/gsm8k_test.parquet" ;;
+  math500)   echo "$WORKDIR/data/math500_test.parquet" ;;
+  humaneval) echo "$WORKDIR/data/humaneval_test.parquet" ;;
   *) echo "" ;; esac; }
 
 echo "===== 1/3: env ====="
@@ -80,6 +83,7 @@ for VAL_DATA in $VAL_SETS; do
       data.prompt_key=content \
       data.train_files=$WORKDIR/data/lmsys_test-00000-of-00001.parquet \
       data.val_files=$VAL \
+      data.validation_shuffle=False \
       data.train_batch_size=256 \
       data.val_batch_size=600 \
       data.max_prompt_length=2048 \
