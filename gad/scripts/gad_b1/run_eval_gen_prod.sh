@@ -41,6 +41,9 @@ valfile() { case "$1" in
   gsm8k)     echo "$WORKDIR/data/gsm8k_test.parquet" ;;
   math500)   echo "$WORKDIR/data/math500_test.parquet" ;;
   humaneval) echo "$WORKDIR/data/humaneval_test.parquet" ;;
+  ifeval)    echo "$WORKDIR/data/ifeval_test.parquet" ;;
+  mmlu)      echo "$WORKDIR/data/mmlu_test.parquet" ;;
+  audit)     echo "$WORKDIR/data/audit/audit_prompts.parquet" ;;   # D2 gate stage-2 held-out bank
   *) echo "" ;; esac; }
 
 echo "===== 1/3: env ====="
@@ -53,8 +56,17 @@ export RAY_TMPDIR=/tmp/rj${SLURM_JOB_ID}; mkdir -p $RAY_TMPDIR $WORKDIR/tmp $OUT
 trap 'cp -r $RAY_TMPDIR $WORKDIR/logs/ray-${SLURM_JOB_ID} 2>/dev/null || true' EXIT
 ulimit -n 65536 || true
 
-echo "===== 2/3: verl branch = eval + resolve model ====="
-cd $VERL && git checkout eval 2>&1 | tail -1
+echo "===== 2/3: verl branch = gad-d2-replay (unified; no checkout to avoid shared-tree race) ====="
+# UNIFIED (2026-07-30): eval runs on gad-d2-replay, which now carries the ported eval-format
+# val dump (_dump_generations_eval -> {input,output,teacher_output}). We deliberately do NOT
+# `git checkout eval` here: that mutated the SHARED editable-install tree and deleted
+# recipe/gad/replay_integration.py, crashing concurrently-starting GAD arms. Assert we're on
+# gad-d2-replay rather than switching (switching is the hazard).
+cd $VERL
+CURBR=$(git branch --show-current)
+if [ "$CURBR" != "gad-d2-replay" ]; then
+  echo "WARN: verl tree on '$CURBR', expected gad-d2-replay; NOT auto-switching (race-prone). Fix the tree first." >&2
+fi
 echo "verl branch: $(git branch --show-current)"
 if [ -n "${MODEL_PATH:-}" ]; then
   # direct HF model (e.g. pre-distillation base Qwen2.5-7B-Instruct) — no FSDP merge
@@ -91,6 +103,8 @@ for VAL_DATA in $VAL_SETS; do
       data.truncation=right \
       +data.dataloader_num_workers=0 \
       actor_rollout_ref.model.path=$MODEL_PATH \
+      critic.model.path=$MODEL_PATH \
+      critic.model.fsdp_config.param_offload=True \
       actor_rollout_ref.actor.optim.lr=1e-6 \
       actor_rollout_ref.actor.grad_clip=0.2 \
       actor_rollout_ref.model.use_remove_padding=True \
