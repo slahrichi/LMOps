@@ -44,6 +44,7 @@ valfile() { case "$1" in
   ifeval)    echo "$WORKDIR/data/ifeval_test.parquet" ;;
   mmlu)      echo "$WORKDIR/data/mmlu_test.parquet" ;;
   audit)     echo "$WORKDIR/data/audit/audit_prompts.parquet" ;;   # D2 gate stage-2 held-out bank
+  foreignsrc) echo "$WORKDIR/data/foreignsrc_test.parquet" ;;      # D2 foreign-vintage buffer source (4096 strat33)
   *) echo "" ;; esac; }
 
 echo "===== 1/3: env ====="
