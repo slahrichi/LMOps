@@ -38,7 +38,8 @@ python $WORKDIR/judge_winrate.py \
     --reference "$REFERENCE" \
     --judge-model "$JUDGE" \
     --tp 2 \
+    --data-dir "$WORKDIR/data" \
     $([ "$TEACHER_CEILING" = "1" ] && echo --teacher-ceiling) \
-    --out "$GEN_DIR/score_${REFERENCE}.json"
+    --out "${OUT:-$GEN_DIR/score_${REFERENCE}.json}"
 echo ""
 echo "===== done ====="; cat "$GEN_DIR/score_${REFERENCE}.json" 2>/dev/null
