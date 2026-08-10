@@ -22,7 +22,7 @@ unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
 WORKDIR=/home/saadlahrichi/gad_run
 LMOPS=/home/saadlahrichi/LMOps
-VERL=$LMOPS/gad/verl
+VERL=/home/saadlahrichi/LMOps/gad/verl_eval_wt
 EXP=${EXP:?set EXP (e.g. fs33-gad-replay / fs33-gad-base / fs33-seqkd)}
 STEP=${STEP:?set STEP (checkpoint global_step, e.g. 492)}
 CKPT_ROOT=${CKPT_ROOT:-$WORKDIR/ckpts}          # Lustre for prod arms: /checkpoints/$USER/gad_run/ckpts
@@ -49,6 +49,7 @@ valfile() { case "$1" in
 
 echo "===== 1/3: env ====="
 source $WORKDIR/venv/bin/activate
+export PYTHONPATH=/home/saadlahrichi/LMOps/gad/verl_eval_wt:${PYTHONPATH:-}  # worktree pin (gad-d2-replay) for per-set eval dump
 export TMPDIR=$WORKDIR/tmp TEMP=$WORKDIR/tmp TMP=$WORKDIR/tmp HF_HOME=$WORKDIR/hf
 export C_INCLUDE_PATH=$WORKDIR/pyinclude:${C_INCLUDE_PATH:-}
 export CPLUS_INCLUDE_PATH=$WORKDIR/pyinclude:${CPLUS_INCLUDE_PATH:-}
