@@ -102,7 +102,8 @@ def score_candidates(llm, tok, questions, cands, refs, rng, max_tokens=1024):
         cand_is_a1.append(a1_is_cand)
     gen = llm.generate(prompts, SamplingParams(temperature=0.0, max_tokens=max_tokens))
     ratios, csc, rsc, bad = [], [], [], 0
-    for g, a1_is_cand in zip(gen, cand_is_a1):
+    pp = []  # per-prompt records (B1 length-controlled analysis)
+    for idx, (g, a1_is_cand) in enumerate(zip(gen, cand_is_a1)):
         sc = parse_scores(g.outputs[0].text)
         if sc is None:
             bad += 1; continue
@@ -111,10 +112,12 @@ def score_candidates(llm, tok, questions, cands, refs, rng, max_tokens=1024):
         if cs + rs <= 0:
             bad += 1; continue
         ratios.append(cs / (cs + rs)); csc.append(cs); rsc.append(rs)
+        pp.append({"i": idx, "cs": cs, "rs": rs, "ratio": cs / (cs + rs)})
     return {"n_scored": len(ratios), "n_unparsed": bad,
             "score": (st.mean(ratios) if ratios else float("nan")),
             "mean_student_1to10": (st.mean(csc) if csc else float("nan")),
-            "mean_ref_1to10": (st.mean(rsc) if rsc else float("nan"))}
+            "mean_ref_1to10": (st.mean(rsc) if rsc else float("nan")),
+            "perprompt": pp}
 
 
 def main():
@@ -154,6 +157,15 @@ def main():
             refs = [r["teacher"] for r in rows]
 
         res = score_candidates(llm, tok, questions, [r["student"] for r in rows], refs, rng)
+        pp_recs = res.pop("perprompt", [])
+        # per-prompt dump for the B1 length-controlled analysis (student length + judge scores)
+        pp_path = os.path.join(args.gen_dir, f"{name}_perprompt.jsonl")
+        with open(pp_path, "w") as pf:
+            for rec in pp_recs:
+                s = rows[rec["i"]]["student"]
+                pf.write(json.dumps({"set": name, "i": rec["i"],
+                    "student_words": len(s.split()), "student_chars": len(s),
+                    "cs": rec["cs"], "rs": rec["rs"], "ratio": rec["ratio"]}) + "\n")
         results[name] = {"n": len(rows), **res}
         print(f"{name:10s} n={len(rows):4d}  score={res['score']:.3f}  "
               f"(student {res['mean_student_1to10']:.2f} vs ref {res['mean_ref_1to10']:.2f} /10, "
