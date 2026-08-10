@@ -42,5 +42,13 @@ export EXP WARMUP_EXP RESUME_STEP VAL
 export TRAIN=$WORKDIR/data/mini_train.parquet
 export CKPT_ROOT=/checkpoints/saadlahrichi/gad_run/ckpts
 export REPLAY_CAPACITY=0
-export EXTRA_ARGS="trainer.val_only=True trainer.val_before_train=True trainer.total_epochs=1 trainer.save_freq=-1 trainer.resume_mode=resume_path trainer.resume_from_path=$RESUME_DIR +critic.audit.path=$SCOREDIR +critic.audit.vintages=[$VINTAGES]"
+# The audit must score with the D@T critic in RESUME_DIR. trainer._load_checkpoint() does NOT
+# restore weights (calls commented out), so resume_from_path can't swap D — instead hand the
+# critic ckpt to run_gad_prod.sh's SCORE_CRITIC_CKPT hook, which merges it to HF and points
+# critic.model.path at it. resume_mode=disable so no spurious global_step/dataloader restore.
+export SCORE_CRITIC_CKPT="$RESUME_DIR/critic"
+# NGPU (default 8): shrink the audit to fewer GPUs so it can pack onto partially-free nodes
+# (val-only audit is world-size-agnostic — vintages are replicated). Hydra last-wins overrides
+# run_gad_prod's hardcoded trainer.n_gpus_per_node=8. Pass --gpus=$NGPU via "$@" to match.
+export EXTRA_ARGS="trainer.val_only=True trainer.val_before_train=True trainer.total_epochs=1 trainer.save_freq=-1 trainer.resume_mode=disable +critic.audit.path=$SCOREDIR +critic.audit.vintages=[] trainer.n_gpus_per_node=${NGPU:-8}"
 exec sbatch "$@" "$HERE/run_gad_prod.sh"

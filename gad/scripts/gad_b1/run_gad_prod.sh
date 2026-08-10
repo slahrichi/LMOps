@@ -91,6 +91,25 @@ flock -u 9
 MODEL_PATH=$WCKPT/actor/huggingface
 REWARD_PATH=$WCKPT/critic/huggingface
 
+# ---- D2 RD-SCORING critic override (design §5) ----
+# trainer._load_checkpoint() does NOT restore weights (the load_checkpoint calls are commented
+# out — weights come from *.model.path at init), so trainer.resume_from_path can't swap the D
+# for offline scoring: every job would audit the warmup critic -> identical margins (bug found
+# 2026-08-03). Fix: when SCORE_CRITIC_CKPT (an FSDP critic ckpt dir, e.g. .../global_step_492/
+# critic) is set, merge IT to HF here (compute node runs as root -> Lustre ckpt dir is writable)
+# and point critic.model.path at it so the audit scores the intended D@T. No-op for training.
+if [ -n "${SCORE_CRITIC_CKPT:-}" ]; then
+  echo "  [RD-score] overriding critic with $SCORE_CRITIC_CKPT"
+  if ! ls "$SCORE_CRITIC_CKPT/huggingface"/*.safetensors >/dev/null 2>&1; then
+    mkdir -p "$SCORE_CRITIC_CKPT/huggingface"
+    find "$SCORE_CRITIC_CKPT/" -maxdepth 1 -type f ! -name "*.pt" -exec cp {} "$SCORE_CRITIC_CKPT/huggingface/" \;
+    python tools/merge_model2hf.py --local_dir "$SCORE_CRITIC_CKPT"
+  fi
+  ls "$SCORE_CRITIC_CKPT/huggingface"/*.safetensors >/dev/null 2>&1 || { echo "ERROR: SCORE_CRITIC_CKPT merge produced no safetensors"; exit 1; }
+  REWARD_PATH="$SCORE_CRITIC_CKPT/huggingface"
+  echo "  [RD-score] critic.model.path -> $REWARD_PATH"
+fi
+
 echo "===== 4/4: launch GAD adversarial (2 epochs) | replay capacity=$REPLAY_CAPACITY rho=$REPLAY_RHO ====="
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
